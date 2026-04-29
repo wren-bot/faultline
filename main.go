@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"os"
@@ -108,7 +109,7 @@ func main() {
 
 	defer agent.Close()
 
-	if err := agent.Run(ctx, shutdownCh); err != nil && err != context.Canceled {
+	if err := agent.Run(ctx, shutdownCh); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("agent terminated with error", "error", err)
 		os.Exit(1)
 	}

@@ -99,12 +99,12 @@ func BuildCycleContext(systemPrompt string, memories []SearchResult, now time.Ti
 
 	sb.WriteString(systemPrompt)
 	sb.WriteString("\n\n---\n\n")
-	sb.WriteString(fmt.Sprintf("**Current Time**: %s\n\n", now.Format(time.RFC1123)))
+	fmt.Fprintf(&sb, "**Current Time**: %s\n\n", now.Format(time.RFC1123))
 
 	if len(memories) > 0 {
 		sb.WriteString("## Recent Memories\n\n")
 		for _, m := range memories {
-			sb.WriteString(fmt.Sprintf("### %s\n", m.Path))
+			fmt.Fprintf(&sb, "### %s\n", m.Path)
 			content := m.Content
 			if len(content) > 2000 {
 				content = content[:2000] + "\n\n*[truncated]*"

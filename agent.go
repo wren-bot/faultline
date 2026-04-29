@@ -100,7 +100,7 @@ func toolMessage(toolCallID, body string) openai.ChatCompletionMessage {
 // The agent runs indefinitely in a single conversation. When context reaches
 // the compaction threshold, the agent is asked to save state and produce a
 // summary, then the context is rebuilt and operation continues seamlessly.
-// ctx is cancelled only on forced exit (second SIGINT).
+// ctx is canceled only on forced exit (second SIGINT).
 // shutdownCh is closed on first SIGINT to trigger graceful save.
 func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 	a.logger.Info("=== agent starting continuous operation ===")
@@ -150,7 +150,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		}
 
 		// Send to LLM. We deliberately let the request run to completion
-		// rather than cancelling on a collaborator message: cutting a
+		// rather than canceling on a collaborator message: cutting a
 		// generation off mid-thought wastes tokens and discards the model's
 		// reasoning. Any collaborator messages that arrive during generation
 		// are handled after the response comes back (see below).
@@ -161,10 +161,10 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			MaxTokens:   a.cfg.Agent.MaxRespTokens,
 		})
 		if err != nil {
-			// If the parent context was cancelled (forced shutdown via
+			// If the parent context was canceled (forced shutdown via
 			// second SIGINT), return the cancellation error verbatim so
-			// main.go's err != context.Canceled filter recognises it as
-			// a clean exit rather than a fatal LLM error.
+			// main.go's errors.Is(err, context.Canceled) filter recognizes
+			// it as a clean exit rather than a fatal LLM error.
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}

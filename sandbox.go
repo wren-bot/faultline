@@ -122,7 +122,9 @@ func (s *Sandbox) logExec(operation string, detail string, duration time.Duratio
 		output,
 	)
 
-	s.execLog.Write([]byte(entry))
+	if _, err := s.execLog.Write([]byte(entry)); err != nil {
+		s.logger.Warn("failed to write sandbox exec log", "error", err)
+	}
 }
 
 func (s *Sandbox) init() error {
@@ -263,7 +265,7 @@ func (s *Sandbox) ReadFile(folder, name string, offset, lines int) (string, erro
 		if lines > 0 && collected >= lines {
 			break
 		}
-		sb.WriteString(fmt.Sprintf("%d: %s\n", lineNum, scanner.Text()))
+		fmt.Fprintf(&sb, "%d: %s\n", lineNum, scanner.Text())
 		collected++
 	}
 
@@ -539,7 +541,9 @@ func (s *Sandbox) dockerRun(ctx context.Context, needsNetwork bool, command ...s
 		// process, but the container itself may keep running.
 		s.logger.Warn("sandbox timeout, killing container", "container", containerName)
 		killCmd := exec.Command("docker", "kill", containerName)
-		killCmd.Run() // best-effort, ignore errors
+		// Best-effort: the container may already be gone, or docker may be
+		// unreachable. We've already timed out; nothing useful to do here.
+		_ = killCmd.Run()
 		return string(output), fmt.Errorf("execution timed out after %s", s.timeout)
 	}
 	if err != nil {
@@ -617,7 +621,6 @@ func shellQuote(s string) string {
 	// Replace single quotes with '\'' (end quote, escaped quote, start quote)
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
-
 
 // ---------------------------------------------------------------------------
 // Shell execution
@@ -782,7 +785,7 @@ func (s *Sandbox) ListPackages() (string, error) {
 	var sb strings.Builder
 	sb.WriteString("Installed packages:\n")
 	for _, d := range deps {
-		sb.WriteString(fmt.Sprintf("  - %s\n", d))
+		fmt.Fprintf(&sb, "  - %s\n", d)
 	}
 	return sb.String(), nil
 }

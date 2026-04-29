@@ -50,7 +50,7 @@ func NewTelegram(token string, chatID int64, logger *slog.Logger) (*Telegram, er
 }
 
 // Start begins listening for incoming messages.
-// It blocks until the context is cancelled.
+// It blocks until the context is canceled.
 func (t *Telegram) Start(ctx context.Context) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 30

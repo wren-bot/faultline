@@ -1,0 +1,48 @@
+# golangci-lint v2 configuration.
+# See https://golangci-lint.run/docs/configuration/file/ for the schema.
+version: "2"
+
+run:
+  # Use the Go version from go.mod.
+  # Default: read from go.mod
+  timeout: 5m
+
+linters:
+  # Start from the standard "Default" set (errcheck, govet, ineffassign,
+  # staticcheck, unused) and add a few opinionated extras.
+  default: standard
+  enable:
+    - errorlint    # catches err == sentinel comparisons and missing %w in fmt.Errorf
+    - misspell     # common English misspellings in comments and strings
+    - unconvert    # unnecessary type conversions
+    - whitespace   # leading/trailing whitespace in functions
+
+  settings:
+    errorlint:
+      # We use errors.Is/As; flag direct == comparisons.
+      errorf: true
+      asserts: true
+      comparison: true
+    misspell:
+      locale: US
+
+  exclusions:
+    # Be lenient with how generated/vendored files are detected so we don't
+    # accidentally analyse code we didn't write.
+    generated: lax
+    # Built-in exclusion presets that suppress well-known false positives.
+    presets:
+      - common-false-positives
+      - std-error-handling
+    rules:
+      # Tests intentionally do things lint would otherwise flag: unchecked
+      # errors on cleanup, magic numbers in expected outputs, etc.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - errorlint
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

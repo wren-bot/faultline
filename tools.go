@@ -1108,16 +1108,16 @@ func (te *ToolExecutor) memoryList(argsJSON string) string {
 			}
 			totalSize, fileCount, sizeErr := te.memory.DirSize(dirPath)
 			if sizeErr == nil {
-				sb.WriteString(fmt.Sprintf("  [dir]  %s/ (%d files, %s, modified %s)\n",
+				fmt.Fprintf(&sb, "  [dir]  %s/ (%d files, %s, modified %s)\n",
 					e.Name, fileCount, formatBytes(totalSize),
-					e.ModTime.Format("2006-01-02 15:04")))
+					e.ModTime.Format("2006-01-02 15:04"))
 			} else {
-				sb.WriteString(fmt.Sprintf("  [dir]  %s/ (modified %s)\n",
-					e.Name, e.ModTime.Format("2006-01-02 15:04")))
+				fmt.Fprintf(&sb, "  [dir]  %s/ (modified %s)\n",
+					e.Name, e.ModTime.Format("2006-01-02 15:04"))
 			}
 		} else {
-			sb.WriteString(fmt.Sprintf("  [file] %s (%s, modified %s)\n",
-				e.Name, formatBytes(e.Size), e.ModTime.Format("2006-01-02 15:04")))
+			fmt.Fprintf(&sb, "  [file] %s (%s, modified %s)\n",
+				e.Name, formatBytes(e.Size), e.ModTime.Format("2006-01-02 15:04"))
 		}
 	}
 
@@ -1197,8 +1197,8 @@ func (te *ToolExecutor) memorySearch(argsJSON string) string {
 		if len(content) > 1500 {
 			content = content[:1500] + "\n[truncated]"
 		}
-		sb.WriteString(fmt.Sprintf("--- Result %d: %s (score: %.2f) ---\n%s\n\n",
-			i+1, r.Path, r.Score, content))
+		fmt.Fprintf(&sb, "--- Result %d: %s (score: %.2f) ---\n%s\n\n",
+			i+1, r.Path, r.Score, content)
 	}
 
 	return sb.String()
@@ -1291,11 +1291,11 @@ func (te *ToolExecutor) memoryListTrash(argsJSON string) string {
 	sb.WriteString("Trash contents:\n")
 	for _, e := range entries {
 		if e.IsDir {
-			sb.WriteString(fmt.Sprintf("  [dir]  %s/ (modified %s)\n",
-				e.OriginalPath, e.ModTime.Format("2006-01-02 15:04")))
+			fmt.Fprintf(&sb, "  [dir]  %s/ (modified %s)\n",
+				e.OriginalPath, e.ModTime.Format("2006-01-02 15:04"))
 		} else {
-			sb.WriteString(fmt.Sprintf("  [file] %s (%s, modified %s)\n",
-				e.OriginalPath, formatBytes(e.Size), e.ModTime.Format("2006-01-02 15:04")))
+			fmt.Fprintf(&sb, "  [file] %s (%s, modified %s)\n",
+				e.OriginalPath, formatBytes(e.Size), e.ModTime.Format("2006-01-02 15:04"))
 		}
 	}
 	sb.WriteString("\nUse memory_restore with the path shown above to restore a file.")
@@ -1384,13 +1384,13 @@ func (te *ToolExecutor) memoryGrep(argsJSON string) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%d match(es) for '%s' in %s:\n\n", len(matches), args.Pattern, args.Path))
+	fmt.Fprintf(&sb, "%d match(es) for '%s' in %s:\n\n", len(matches), args.Pattern, args.Path)
 	for _, m := range matches {
 		line := m.Line
 		if len(line) > 200 {
 			line = line[:200] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("  L%d: %s\n", m.LineNum, line))
+		fmt.Fprintf(&sb, "  L%d: %s\n", m.LineNum, line)
 	}
 
 	return sb.String()
@@ -1646,8 +1646,8 @@ func (te *ToolExecutor) sandboxList(argsJSON string) string {
 	}
 	var sb strings.Builder
 	for _, f := range files {
-		sb.WriteString(fmt.Sprintf("  %s (%s, modified %s)\n",
-			f.Name, formatBytes(f.Size), f.ModTime.Format("2006-01-02 15:04")))
+		fmt.Fprintf(&sb, "  %s (%s, modified %s)\n",
+			f.Name, formatBytes(f.Size), f.ModTime.Format("2006-01-02 15:04"))
 	}
 	return sb.String()
 }
@@ -1919,7 +1919,6 @@ func (e *htmlExtractor) walk(n *html.Node) {
 
 	// Element handling
 	switch n.Data {
-
 	// --- Headings ---
 	case "h1", "h2", "h3", "h4", "h5", "h6":
 		level := int(n.Data[1] - '0')
@@ -2041,9 +2040,9 @@ func (e *htmlExtractor) walk(n *html.Node) {
 			ctx := &e.listStack[depth-1]
 			if ctx.ordered {
 				ctx.index++
-				e.sb.WriteString(fmt.Sprintf("\n%s%d. ", indent, ctx.index))
+				fmt.Fprintf(&e.sb, "\n%s%d. ", indent, ctx.index)
 			} else {
-				e.sb.WriteString(fmt.Sprintf("\n%s- ", indent))
+				fmt.Fprintf(&e.sb, "\n%s- ", indent)
 			}
 		} else {
 			e.sb.WriteString("\n- ")

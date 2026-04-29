@@ -179,7 +179,7 @@ func (m *MemoryStore) ReadLines(path string, offset, lines int) (string, int, er
 		if lines > 0 && collected >= lines {
 			break
 		}
-		sb.WriteString(fmt.Sprintf("%d: %s\n", lineNum, scanner.Text()))
+		fmt.Fprintf(&sb, "%d: %s\n", lineNum, scanner.Text())
 		collected++
 	}
 
@@ -448,7 +448,7 @@ func (m *MemoryStore) Delete(path string) error {
 // Restore moves a file or directory from the .trash/ directory back to its
 // original location in the memory store. The path should be relative to the
 // trash root (mirroring the original memory path). Tries the exact path first,
-// then with .md extension appended, matching the resolution behaviour of
+// then with .md extension appended, matching the resolution behavior of
 // normal memory operations.
 //
 // If the trashed file has a timestamp suffix from a collision rename (e.g.
