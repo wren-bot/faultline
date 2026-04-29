@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -82,7 +83,18 @@ func (a *Agent) Close() {
 }
 
 // errShutdown is a sentinel error indicating a graceful shutdown was completed.
-var errShutdown = fmt.Errorf("graceful shutdown completed")
+var errShutdown = errors.New("graceful shutdown completed")
+
+// toolMessage builds a tool-role chat message satisfying a tool_call_id.
+// The body is prefixed with an RFC1123 timestamp so the model has a
+// consistent temporal frame for every tool result it sees.
+func toolMessage(toolCallID, body string) openai.ChatCompletionMessage {
+	return openai.ChatCompletionMessage{
+		Role:       openai.ChatMessageRoleTool,
+		Content:    fmt.Sprintf("[%s]\n%s", time.Now().Format(time.RFC1123), body),
+		ToolCallID: toolCallID,
+	}
+}
 
 // Run starts the agent's continuous operation loop.
 // The agent runs indefinitely in a single conversation. When context reaches
@@ -111,9 +123,8 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		default:
 		}
 
-		// Inject any pending operator messages before each turn
+		// Inject any collaborator messages that arrived between turns.
 		messages, _ = a.injectPendingMessages(messages)
-		a.drainWakeup()
 
 		// Check if compaction is needed
 		tokenEst := EstimateMessagesTokens(messages)
@@ -138,34 +149,24 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			continue
 		}
 
-		// Create a per-turn context. If an operator message arrives while
-		// the LLM is generating, we cancel this context to abort the
-		// in-flight request so the agent sees the message immediately.
-		turnCtx, turnCancel := context.WithCancel(ctx)
-		if a.telegram != nil {
-			go func() {
-				select {
-				case <-turnCtx.Done():
-				case <-a.telegram.WakeupChan():
-					turnCancel()
-				}
-			}()
-		}
-
-		// Send to LLM
-		resp, err := a.llm.Chat(turnCtx, ChatRequest{
+		// Send to LLM. We deliberately let the request run to completion
+		// rather than cancelling on a collaborator message: cutting a
+		// generation off mid-thought wastes tokens and discards the model's
+		// reasoning. Any collaborator messages that arrive during generation
+		// are handled after the response comes back (see below).
+		resp, err := a.llm.Chat(ctx, ChatRequest{
 			Messages:    messages,
 			Tools:       toolDefs,
 			Temperature: a.cfg.Agent.Temperature,
 			MaxTokens:   a.cfg.Agent.MaxRespTokens,
 		})
-		turnCancel()
-
 		if err != nil {
-			// Distinguish operator-message interrupt from real errors
-			if turnCtx.Err() != nil && ctx.Err() == nil {
-				a.logger.Info("turn interrupted by incoming operator message")
-				continue
+			// If the parent context was cancelled (forced shutdown via
+			// second SIGINT), return the cancellation error verbatim so
+			// main.go's err != context.Canceled filter recognises it as
+			// a clean exit rather than a fatal LLM error.
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
 			return fmt.Errorf("llm chat: %w", err)
 		}
@@ -177,21 +178,46 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			a.logThought(msg.Content)
 		}
 
-		// Handle tool calls
-		if len(msg.ToolCalls) > 0 {
-			a.tools.SetContextInfo(EstimateMessagesTokens(messages))
+		// Drain any collaborator messages that arrived while the LLM was
+		// generating. We will handle them at the next available
+		// opportunity rather than mid-generation.
+		var pending []string
+		if a.telegram != nil {
+			pending = a.telegram.Pending()
+		}
 
+		switch {
+		case len(msg.ToolCalls) > 0 && len(pending) > 0:
+			// A collaborator message arrived while the model wanted to use
+			// tools. Defer the tool calls: every tool_call_id must still
+			// have a matching tool response or the next API call will fail,
+			// so we emit a "deferred" stub for each, then surface the
+			// collaborator message. The agent can reply and decide whether
+			// the deferred actions are still appropriate.
+			a.logger.Info("collaborator message arrived during generation; deferring tool calls",
+				"tool_calls", len(msg.ToolCalls), "pending", len(pending))
+			const deferredBody = "[Deferred] A message from your collaborator arrived before this tool call could run. Read their message below and reply with send_message first. After replying, re-issue this tool call if it still makes sense, or move on if their message changes your plan."
+			for _, tc := range msg.ToolCalls {
+				messages = append(messages, toolMessage(tc.ID, deferredBody))
+			}
+			messages = a.appendCollaboratorMessages(messages, pending)
+
+		case len(msg.ToolCalls) > 0:
+			// Normal tool execution path.
+			a.tools.SetContextInfo(EstimateMessagesTokens(messages))
 			for _, tc := range msg.ToolCalls {
 				result := a.tools.Execute(ctx, tc)
-				timestamped := fmt.Sprintf("[%s]\n%s", time.Now().Format(time.RFC1123), result)
-				messages = append(messages, openai.ChatCompletionMessage{
-					Role:       openai.ChatMessageRoleTool,
-					Content:    timestamped,
-					ToolCallID: tc.ID,
-				})
+				messages = append(messages, toolMessage(tc.ID, result))
 			}
-		} else {
-			// Text-only response - inject continue prompt to keep going
+
+		case len(pending) > 0:
+			// Text-only response with collaborator messages waiting: surface
+			// them in place of the continue prompt so the next turn
+			// addresses the collaborator naturally.
+			messages = a.appendCollaboratorMessages(messages, pending)
+
+		default:
+			// Text-only response, nothing to inject - keep the loop going.
 			messages = append(messages, openai.ChatCompletionMessage{
 				Role:    openai.ChatMessageRoleUser,
 				Content: RenderPrompt(prompts["continue"], time.Now()),
@@ -246,6 +272,12 @@ func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]
 
 // compactContext performs context compaction: asks the agent to save its state
 // and produce a summary, then rebuilds the context with that summary.
+//
+// The returned prompts map may differ from the one passed in: rebuildContext
+// re-reads all prompt files from the memory store, so any edits the agent
+// made to its own prompts during compaction take effect on the next turn.
+// The compaction prompt itself was already rendered before this loop began,
+// so edits to prompts/compaction.md only take effect on the *next* compaction.
 func (a *Agent) compactContext(ctx context.Context, messages []openai.ChatCompletionMessage, toolDefs []openai.Tool, prompts map[string]string) ([]openai.ChatCompletionMessage, map[string]string, error) {
 	a.logger.Info("starting context compaction")
 
@@ -273,6 +305,9 @@ func (a *Agent) compactContext(ctx context.Context, messages []openai.ChatComple
 			MaxTokens:   a.cfg.Agent.MaxRespTokens,
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
 			return nil, nil, fmt.Errorf("llm chat during compaction: %w", err)
 		}
 
@@ -289,12 +324,7 @@ func (a *Agent) compactContext(ctx context.Context, messages []openai.ChatComple
 
 			for _, tc := range msg.ToolCalls {
 				result := a.tools.Execute(ctx, tc)
-				timestamped := fmt.Sprintf("[%s]\n%s", time.Now().Format(time.RFC1123), result)
-				messages = append(messages, openai.ChatCompletionMessage{
-					Role:       openai.ChatMessageRoleTool,
-					Content:    timestamped,
-					ToolCallID: tc.ID,
-				})
+				messages = append(messages, toolMessage(tc.ID, result))
 			}
 		} else {
 			// Text-only response - agent is done saving state
@@ -362,53 +392,38 @@ func isOperationalFile(path string) bool {
 	return false
 }
 
-// gatherContextMemories finds relevant memories to include in context.
-// Returns the most recently modified non-operational files.
-func (a *Agent) gatherContextMemories() []SearchResult {
-	var results []SearchResult
+// contextMemoryCount is the maximum number of recent memory files surfaced
+// in the system prompt. Kept low to bound the prompt size; each entry is
+// also content-truncated by BuildCycleContext.
+const contextMemoryCount = 5
 
-	// Get recent files (most recently modified)
-	recent, err := a.memory.RecentFiles(5)
-	if err == nil {
-		for _, r := range recent {
-			if !isOperationalFile(r.Path) {
-				results = append(results, r)
-			}
+// gatherContextMemories finds relevant memories to include in context.
+// Returns up to contextMemoryCount most-recently-modified non-operational files.
+func (a *Agent) gatherContextMemories() []SearchResult {
+	// Request more than we need: operational files (prompts/, trash) are
+	// filtered out below, and we want to land at contextMemoryCount real
+	// memories whenever that many exist on disk.
+	recent, err := a.memory.RecentFiles(contextMemoryCount * 4)
+	if err != nil {
+		return nil
+	}
+
+	results := make([]SearchResult, 0, contextMemoryCount)
+	for _, r := range recent {
+		if isOperationalFile(r.Path) {
+			continue
+		}
+		results = append(results, r)
+		if len(results) >= contextMemoryCount {
+			break
 		}
 	}
-
-	// Cap total context memories to avoid blowing up the system prompt
-	if len(results) > 5 {
-		results = results[:5]
-	}
-
 	return results
 }
 
-// drainWakeup consumes any pending wakeup signal so the interrupt goroutine
-// doesn't fire on stale signals from messages we already processed.
-func (a *Agent) drainWakeup() {
-	if a.telegram == nil {
-		return
-	}
-	select {
-	case <-a.telegram.WakeupChan():
-	default:
-	}
-}
-
-// wakeupChan returns a channel that signals when an operator message arrives.
-// Returns a nil channel (blocks forever) if Telegram is not configured,
-// so the select in the sleep loop falls through to the timer.
-func (a *Agent) wakeupChan() <-chan struct{} {
-	if a.telegram != nil {
-		return a.telegram.WakeupChan()
-	}
-	return nil
-}
-
-// injectPendingMessages checks for queued operator messages and appends them
-// to the conversation. Returns the updated messages and whether any were injected.
+// injectPendingMessages checks for queued collaborator messages and appends
+// them to the conversation. Returns the updated messages and whether any
+// were injected.
 func (a *Agent) injectPendingMessages(messages []openai.ChatCompletionMessage) ([]openai.ChatCompletionMessage, bool) {
 	if a.telegram == nil {
 		return messages, false
@@ -419,21 +434,29 @@ func (a *Agent) injectPendingMessages(messages []openai.ChatCompletionMessage) (
 		return messages, false
 	}
 
+	return a.appendCollaboratorMessages(messages, pending), true
+}
+
+// appendCollaboratorMessages formats each collaborator message as a user
+// turn and appends them to the conversation. Used by both the between-turn
+// injector and the post-response handler when messages arrive during
+// generation.
+func (a *Agent) appendCollaboratorMessages(messages []openai.ChatCompletionMessage, pending []string) []openai.ChatCompletionMessage {
 	for _, text := range pending {
-		a.logger.Info("injecting operator message into conversation", "text", text)
+		a.logger.Info("injecting collaborator message into conversation", "text", text)
 		messages = append(messages, openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleUser,
-			Content: fmt.Sprintf("[OPERATOR MESSAGE - RESPOND TO THIS BEFORE CONTINUING OTHER WORK]\n\nYour operator says: %s\n\nPlease acknowledge and respond to this message. Use send_message to reply to your operator, then you may continue what you were doing.", text),
+			Role: openai.ChatMessageRoleUser,
+			Content: fmt.Sprintf("[Collaborator message - %s]\n\nYour collaborator says: %s\n\nReply with send_message before continuing. If their message changes what you should do next, adjust your plan accordingly; otherwise resume where you left off.",
+				time.Now().Format(time.RFC1123), text),
 		})
 	}
-
-	return messages, true
+	return messages
 }
 
 // handleShutdown wraps gracefulSave and translates errShutdown to nil.
 func (a *Agent) handleShutdown(ctx context.Context, messages []openai.ChatCompletionMessage, toolDefs []openai.Tool, prompts map[string]string) error {
 	err := a.gracefulSave(ctx, messages, toolDefs, prompts)
-	if err == errShutdown {
+	if errors.Is(err, errShutdown) {
 		return nil
 	}
 	return err
@@ -478,12 +501,7 @@ func (a *Agent) gracefulSave(ctx context.Context, messages []openai.ChatCompleti
 			a.tools.SetContextInfo(EstimateMessagesTokens(messages))
 			for _, tc := range msg.ToolCalls {
 				result := a.tools.Execute(saveCtx, tc)
-				timestamped := fmt.Sprintf("[%s]\n%s", time.Now().Format(time.RFC1123), result)
-				messages = append(messages, openai.ChatCompletionMessage{
-					Role:       openai.ChatMessageRoleTool,
-					Content:    timestamped,
-					ToolCallID: tc.ID,
-				})
+				messages = append(messages, toolMessage(tc.ID, result))
 			}
 		} else {
 			// No tool calls - agent is done saving

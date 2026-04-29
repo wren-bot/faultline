@@ -26,13 +26,11 @@ type APIConfig struct {
 
 // AgentConfig holds agent behavior settings.
 type AgentConfig struct {
-	MemoryDir           string   `toml:"memory_dir"`
-	CycleSleep          duration `toml:"cycle_sleep"`
-	MaxTokens           int      `toml:"max_tokens"`
-	MaxTurns            int      `toml:"max_turns"`
-	Temperature         float32  `toml:"temperature"`
-	MaxRespTokens       int      `toml:"max_response_tokens"`
-	CompactionThreshold int      `toml:"compaction_threshold"`
+	MemoryDir           string  `toml:"memory_dir"`
+	MaxTokens           int     `toml:"max_tokens"`
+	Temperature         float32 `toml:"temperature"`
+	MaxRespTokens       int     `toml:"max_response_tokens"`
+	CompactionThreshold int     `toml:"compaction_threshold"`
 }
 
 // TelegramConfig holds optional Telegram bot settings.
@@ -87,9 +85,7 @@ func DefaultConfig() *Config {
 		},
 		Agent: AgentConfig{
 			MemoryDir:           "./memory",
-			CycleSleep:          duration(60 * time.Second),
 			MaxTokens:           262144,
-			MaxTurns:            50,
 			Temperature:         0.8,
 			MaxRespTokens:       4096,
 			CompactionThreshold: 150000,

@@ -13,7 +13,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// Telegram manages bidirectional communication with the operator.
+// Telegram manages bidirectional communication with the collaborator.
 type Telegram struct {
 	bot    *tgbotapi.BotAPI
 	chatID int64
@@ -21,7 +21,6 @@ type Telegram struct {
 
 	mu      sync.Mutex
 	pending []string
-	wakeup  chan struct{}
 }
 
 // NewTelegram creates a new Telegram bot connection.
@@ -47,7 +46,6 @@ func NewTelegram(token string, chatID int64, logger *slog.Logger) (*Telegram, er
 		bot:    bot,
 		chatID: chatID,
 		logger: logger,
-		wakeup: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -100,18 +98,11 @@ func (t *Telegram) Start(ctx context.Context) {
 			continue
 		}
 
-		t.logger.Info("received message from operator", "text", text)
+		t.logger.Info("received message from collaborator", "text", text)
 
 		t.mu.Lock()
 		t.pending = append(t.pending, text)
 		t.mu.Unlock()
-
-		// Signal the agent to wake up if it's sleeping
-		select {
-		case t.wakeup <- struct{}{}:
-		default:
-			// Already signaled, don't block
-		}
 	}
 
 	t.logger.Info("telegram listener stopped")
@@ -145,7 +136,7 @@ func toTelegramMarkdown(text string) (string, bool) {
 	return result, true
 }
 
-// Send sends a text message to the operator.
+// Send sends a text message to the collaborator.
 func (t *Telegram) Send(text string) error {
 	// Telegram has a 4096 character limit per message.
 	// Split long messages.
@@ -209,9 +200,4 @@ func (t *Telegram) Pending() []string {
 	msgs := t.pending
 	t.pending = nil
 	return msgs
-}
-
-// WakeupChan returns a channel that signals when a new message arrives.
-func (t *Telegram) WakeupChan() <-chan struct{} {
-	return t.wakeup
 }

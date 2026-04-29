@@ -10,10 +10,22 @@ import (
 
 // LLMClient wraps the OpenAI-compatible API client.
 type LLMClient struct {
-	client       *openai.Client
-	model        string
-	logger       *slog.Logger
-	lastLoggedAt int // tracks how many messages were logged to avoid re-logging the full context
+	client *openai.Client
+	model  string
+	logger *slog.Logger
+
+	// lastLoggedAt is the index of the first message that has not yet been
+	// debug-logged. On each Chat() call we only log messages with index >=
+	// lastLoggedAt, then advance it to len(messages). This avoids re-logging
+	// the entire conversation on every turn (the message list grows
+	// monotonically within a single context lifetime).
+	//
+	// Assumption: the message slice grows append-only between calls. When
+	// the agent rebuilds context (compaction, restart) the new slice is
+	// shorter than lastLoggedAt; we detect that and reset to log the full
+	// new context once. Any other shrinkage will also trigger a full
+	// re-log on the next call, which is cosmetic noise but not incorrect.
+	lastLoggedAt int
 }
 
 // NewLLMClient creates a new LLM client configured for the given endpoint.
@@ -62,10 +74,12 @@ func (l *LLMClient) Chat(ctx context.Context, req ChatRequest) (*openai.ChatComp
 		"model", l.model,
 	)
 
-	// Only log NEW messages since the last request (avoid re-logging the full context)
+	// Only log NEW messages since the last request (avoid re-logging the full context).
+	// See the doc comment on lastLoggedAt for the invariant being maintained here.
 	start := l.lastLoggedAt
 	if len(req.Messages) < start {
-		// New cycle - message list is shorter, log everything
+		// Message list shrank: context was rebuilt (compaction or fresh
+		// run). Log the entire new context once.
 		start = 0
 	}
 	for i := start; i < len(req.Messages); i++ {

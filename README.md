@@ -1,6 +1,6 @@
 # Faultline
 
-An autonomous AI agent daemon written in Go. Faultline runs as a persistent, long-lived process that continuously interacts with an LLM via an OpenAI-compatible API. It learns about the world by browsing the web, persists knowledge in a file-based memory system, communicates with a human operator via Telegram, and can execute Python scripts in a sandboxed Docker environment.
+An autonomous AI agent daemon written in Go. Faultline runs as a persistent, long-lived process that continuously interacts with an LLM via an OpenAI-compatible API. It learns about the world by browsing the web, persists knowledge in a file-based memory system, communicates with a human collaborator via Telegram, and can execute Python scripts in a sandboxed Docker environment.
 
 The agent can modify its own operating prompts, enabling self-directed behavioral evolution over time.
 
@@ -8,7 +8,7 @@ The agent can modify its own operating prompts, enabling self-directed behaviora
 
 - Go 1.25+
 - Docker (for the Python sandbox feature)
-- A Telegram bot token (optional, for operator communication)
+- A Telegram bot token (optional, for collaborator communication)
 - An OpenAI-compatible API endpoint (local or remote)
 
 ## Building
@@ -31,16 +31,14 @@ model = "qwen"                      # Model name
 
 [agent]
 memory_dir = "./memory"             # Directory for persistent memory files
-cycle_sleep = "60s"                 # Sleep between cycles
 max_tokens = 262144                 # Maximum context window size
-max_turns = 50                      # Max turns per cycle
 temperature = 0.8                   # LLM temperature
 max_response_tokens = 4096          # Max tokens per LLM response
 compaction_threshold = 150000       # Token count triggering context compaction
 
 [telegram]
 token = ""                          # Telegram bot token
-chat_id = 0                         # Telegram chat ID for operator
+chat_id = 0                         # Telegram chat ID for collaborator
 
 [log]
 level = "info"                      # Console log level (debug/info/warn/error)
@@ -88,9 +86,15 @@ When the conversation grows beyond a configurable token threshold, the agent is 
 
 The agent's operating prompts (`system.md`, `compaction.md`, `cycle_start.md`, `continue.md`, `shutdown.md`) are mutable files in the memory store. The agent can read and rewrite them, changing its own behavior across context compactions.
 
+The default contents of these prompts live in `prompts/*.md` in the source tree and are embedded into the binary at build time via `//go:embed`. At runtime they are seeded into `<memory_dir>/prompts/*.md` on first startup. After that, the running agent reads from the memory store, not the embedded copies. This means:
+
+- Editing files under `prompts/` in the source tree only affects fresh installs (or installs whose memory store has had those files deleted). To rebuild from defaults, delete `<memory_dir>/prompts/` and restart.
+- Edits the agent makes to its own prompts persist in the memory store and survive restarts.
+- Edits to the embedded defaults require rebuilding the binary.
+
 ### Telegram Integration
 
-Bidirectional communication with a human operator via Telegram. Incoming operator messages interrupt the current LLM turn so the agent sees them immediately. Outgoing messages are converted to Telegram MarkdownV2 with auto-chunking for the 4096-character limit, falling back to plain text on conversion failure.
+Bidirectional communication with a human collaborator via Telegram. Incoming messages are surfaced at the next turn boundary -- the in-flight LLM request is never cancelled, so the agent finishes its current thought before responding. If the agent was about to use tools when the message arrived, those calls are deferred and the agent can choose whether to re-issue them after replying. Outgoing messages are converted to Telegram MarkdownV2 with auto-chunking for the 4096-character limit, falling back to plain text on conversion failure.
 
 ### Python Sandbox
 

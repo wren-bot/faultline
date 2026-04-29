@@ -84,7 +84,7 @@ func main() {
 		go tg.Start(ctx)
 		logger.Info("telegram bot enabled", "chat_id", cfg.Telegram.ChatID)
 
-		// Send a startup ping so the operator knows the bot is alive
+		// Send a startup ping so the collaborator knows the bot is alive
 		if err := tg.Send("Agent starting up. I can hear you."); err != nil {
 			logger.Warn("failed to send startup ping", "error", err)
 		}

@@ -15,7 +15,7 @@ faultline/
   memory.go        File-based persistent memory store with trash/restore
   index.go         BM25 search index (pure Go, in-memory)
   tools.go         Tool definitions, dispatch, web fetching, HTML-to-markdown
-  telegram.go      Telegram bot for bidirectional operator communication
+  telegram.go      Telegram bot for bidirectional collaborator communication
   sandbox.go       Docker-based Python script execution environment
   prompt.go        Prompt loading, embedding, template rendering
   log.go           Daily-rotating log files and multi-handler for slog
@@ -80,12 +80,12 @@ The `Agent` struct and its operation loop. Key components:
 
 - **`Agent` struct**: Holds references to all subsystems (`LLMClient`, `MemoryStore`, `SearchIndex`, `ToolExecutor`, `Telegram`, `Sandbox`).
 - **`NewAgent()`**: Initializes all subsystems, builds the initial search index from existing memory files.
-- **`Run()`**: The main infinite loop. Each iteration: checks for shutdown, injects pending operator messages, checks if compaction is needed, creates a per-turn cancellable context (for operator message interrupts), sends to LLM, processes tool calls or injects a continue prompt.
+- **`Run()`**: The main infinite loop. Each iteration: checks for shutdown, injects pending collaborator messages, checks if compaction is needed, sends to LLM (without cancellation), then processes the response -- handling tool calls, deferring tool calls if a collaborator message arrived during generation, or injecting a continue prompt for plain text responses.
 - **`compactContext()`**: Injects the compaction prompt, gives the agent up to 10 turns to save state and produce a summary, then calls `rebuildContext()`.
 - **`rebuildContext()`**: Rebuilds the search index, reloads prompts (which may have been modified by the agent), gathers fresh context memories, and constructs a new message list.
 - **`gracefulSave()`**: Similar to compaction but triggered by shutdown signal, with a 2-minute timeout.
 - **`gatherContextMemories()`**: Returns the 5 most recently modified non-operational memory files to include in the system prompt.
-- **Operator interrupts**: A goroutine watches the Telegram wakeup channel and cancels the per-turn context if a message arrives, aborting the in-flight LLM request so the agent processes the message on the next iteration.
+- **Collaborator messages mid-generation**: The LLM request is never cancelled. After a response comes back, any collaborator messages queued during generation are drained. If the response was text-only, the collaborator messages are appended in place of the continue prompt. If the response contained tool calls, each `tool_call_id` is satisfied with a "deferred" stub (required to keep the OpenAI message log valid) and the collaborator messages are appended -- letting the agent reply first and decide whether to re-issue the deferred calls.
 
 ### config.go (126 lines)
 
@@ -135,12 +135,11 @@ The largest file. Contains all tool definitions and execution handlers. Key sect
 
 ### telegram.go (217 lines)
 
-`Telegram` struct for bidirectional operator communication:
+`Telegram` struct for bidirectional collaborator communication:
 
-- **Incoming**: Long-polls for updates via `GetUpdatesChan()`. Only accepts messages from the configured chat ID. Queues messages in a mutex-protected slice. Sends a wakeup signal on a buffered channel.
+- **Incoming**: Long-polls for updates via `GetUpdatesChan()`. Only accepts messages from the configured chat ID. Queues messages in a mutex-protected slice for the agent to drain on its next turn boundary.
 - **Outgoing**: Converts markdown to Telegram MarkdownV2 using `goldmark-tgmd`. Auto-chunks messages at 4000 characters (below the 4096 limit), splitting at UTF-8 boundaries and preferring newline breaks. Falls back to plain text if MarkdownV2 conversion or sending fails.
 - **`Pending()`**: Drains and returns all queued messages atomically.
-- **`WakeupChan()`**: Returns the channel used by the agent loop to detect incoming messages during LLM calls.
 
 ### sandbox.go (736 lines)
 
@@ -177,7 +176,7 @@ Manages the mutable prompt system:
 
 4. **Two-phase shutdown**: First signal triggers graceful state-saving; second signal forces immediate exit. The agent has up to 10 turns and 2 minutes to save.
 
-5. **Operator interrupts**: Incoming Telegram messages cancel the current LLM request via context cancellation, so the agent processes them on the next loop iteration without waiting for a potentially long generation to complete.
+5. **Cooperative collaborator handoff**: Incoming Telegram messages never cancel an in-flight LLM request. The agent finishes its current thought, then on the next opportunity (after a text response, or as a deferral of tool calls) the collaborator message is injected, so the model can respond before deciding whether to continue its previous plan.
 
 6. **Soft delete with trash**: Memory files are moved to `.trash/` on delete rather than being permanently removed, enabling restoration.
 
@@ -202,7 +201,7 @@ Manages the mutable prompt system:
 ## Data Flow Summary
 
 1. **Startup**: Load config -> init memory store -> build BM25 index -> seed prompts -> start Telegram -> create agent -> enter loop.
-2. **Each turn**: Check shutdown -> inject operator messages -> check compaction -> send to LLM -> process tool calls or inject continue prompt.
+2. **Each turn**: Check shutdown -> inject collaborator messages -> check compaction -> send to LLM -> process tool calls or inject continue prompt.
 3. **Compaction**: Inject compaction prompt -> agent saves state via tools -> extract summary -> rebuild index -> reload prompts -> rebuild messages.
 4. **Shutdown**: Inject shutdown prompt -> agent saves state via tools -> exit.
 

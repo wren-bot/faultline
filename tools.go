@@ -418,7 +418,7 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "send_message",
-				Description: "Send a message to your operator via Telegram. Use this to share interesting findings, ask questions, report on your progress, or communicate anything you want. Your operator may not respond immediately.",
+				Description: "Send a message to your collaborator via Telegram. Use this to share interesting findings, ask questions, report on your progress, or communicate anything you want. Your collaborator may not respond immediately.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1438,15 +1438,15 @@ func (te *ToolExecutor) sendMessage(argsJSON string) string {
 	}
 
 	if te.telegram == nil {
-		return "Error: messaging is not configured. No operator channel available."
+		return "Error: messaging is not configured. No collaborator channel available."
 	}
 
 	if err := te.telegram.Send(args.Text); err != nil {
 		return fmt.Sprintf("Error sending message: %s", err)
 	}
 
-	te.logger.Info("message sent to operator", "length", len(args.Text))
-	return "Message sent to operator."
+	te.logger.Info("message sent to collaborator", "length", len(args.Text))
+	return "Message sent to collaborator."
 }
 
 func (te *ToolExecutor) memoryEdit(argsJSON string) string {
