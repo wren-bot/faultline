@@ -39,6 +39,15 @@ type AgentConfig struct {
 	Temperature         float32 `toml:"temperature"`
 	MaxRespTokens       int     `toml:"max_response_tokens"`
 	CompactionThreshold int     `toml:"compaction_threshold"`
+
+	// StateFile is the path to a JSON file holding the live conversation
+	// log. When non-empty, the agent saves the message log atomically at
+	// the top of every loop iteration (right before each LLM call) and
+	// restores it on startup. The system message is always rebuilt from
+	// current prompts and memories on load, so prompt edits take effect
+	// across restarts; only the conversation history is preserved.
+	// Empty string disables persistence (legacy behavior).
+	StateFile string `toml:"state_file"`
 }
 
 // TelegramConfig holds optional Telegram bot settings.

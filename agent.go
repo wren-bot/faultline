@@ -104,6 +104,31 @@ func (a *Agent) Close() {
 // errShutdown is a sentinel error indicating a graceful shutdown was completed.
 var errShutdown = errors.New("graceful shutdown completed")
 
+// Idle-loop detection thresholds. When the model produces back-to-back
+// text-only responses (no tool calls, no collaborator input), context grows
+// slowly and compaction never fires, so we need a separate signal to break
+// out. This was added after observing a real failure mode: a low-information
+// continue prompt convinced the model to "stay silent", and it then emitted
+// short text-only replies forever, pinned at ~97k tokens.
+const (
+	// idleNudgeThreshold is the number of consecutive text-only responses
+	// after which the normal continue prompt is replaced with a stronger
+	// instruction telling the model to call a tool or save state.
+	idleNudgeThreshold = 3
+
+	// idleForceCompactionThreshold is the number of consecutive text-only
+	// responses after which we force a context compaction regardless of
+	// token count. By this point the model is clearly stuck and a fresh
+	// rebuild from memories is cheaper than continuing to feed it nudges.
+	idleForceCompactionThreshold = 8
+)
+
+// idleNudgePrompt is injected in place of the normal continue prompt once
+// idleNudgeThreshold consecutive text-only responses have been observed.
+// It is more directive than continue.md on purpose: at this point the
+// model has demonstrated it is not going to act on a gentle reminder.
+const idleNudgePrompt = "[Time: %s]\n\nYou have produced %d text-only responses in a row with no tool calls and no new input from your collaborator. This is a stuck loop. Break out of it now: call a tool. Good options are `context_status` (to see your token usage), `memory_list` with directory `\"\"` (to remember what you have), or `memory_write` to save whatever you were thinking about. Do not reply with another text-only message — that will only deepen the loop."
+
 // toolMessage builds a tool-role chat message satisfying a tool_call_id.
 // The body is prefixed with an RFC1123 timestamp so the model has a
 // consistent temporal frame for every tool result it sees.
@@ -180,13 +205,26 @@ func (a *Agent) logBackendPerf() {
 func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 	a.logger.Info("=== agent starting continuous operation ===")
 
-	// Build initial context
-	messages, prompts, err := a.initializeContext()
+	// Build initial context. When state persistence is enabled and a
+	// saved file exists, this resumes the conversation log; otherwise it
+	// returns a fresh context. idleStreak is restored from the same file
+	// so loop-detection survives restarts.
+	messages, prompts, idleStreak, err := a.initializeContext()
 	if err != nil {
 		return err
 	}
 
 	toolDefs := a.tools.ToolDefs()
+
+	// Track the message log length and idle streak at the moment of the
+	// last successful save. We only re-save when something has actually
+	// changed since then, so an agent sitting on `select` waiting for
+	// a collaborator (rare, but possible if the loop short-circuits
+	// somehow in the future) doesn't grind the disk for nothing.
+	// Length is a sufficient proxy for "did messages change" because
+	// the loop only ever appends to the slice between saves.
+	lastSavedLen := -1
+	lastSavedIdle := -1
 
 	for {
 		// Check for shutdown
@@ -199,7 +237,13 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		}
 
 		// Inject any collaborator messages that arrived between turns.
-		messages, _ = a.injectPendingMessages(messages)
+		// If any were injected, the model has new input to respond to and
+		// is no longer idling.
+		var injected bool
+		messages, injected = a.injectPendingMessages(messages)
+		if injected {
+			idleStreak = 0
+		}
 
 		// Check if compaction is needed
 		tokenEst := a.countMessageTokens(messages)
@@ -210,6 +254,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			if err != nil {
 				return err
 			}
+			idleStreak = 0
 			continue
 		}
 
@@ -221,7 +266,47 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			if err != nil {
 				return err
 			}
+			idleStreak = 0
 			continue
+		}
+
+		// Idle-loop escape hatch. Token-based compaction does not help here
+		// because text-only responses are tiny and the conversation can sit
+		// well below the threshold for hundreds of turns. After enough
+		// consecutive text-only replies, force a rebuild.
+		if idleStreak >= idleForceCompactionThreshold {
+			a.logger.Warn("idle loop detected, forcing compaction",
+				"idle_streak", idleStreak, "tokens_est", tokenEst)
+			messages, prompts, err = a.compactContext(ctx, messages, toolDefs, prompts)
+			if err != nil {
+				return err
+			}
+			idleStreak = 0
+			continue
+		}
+
+		// Persist conversation state before the LLM call. This is the
+		// only point in the loop where messages is at a clean turn
+		// boundary (no half-applied tool calls). A crash between here
+		// and the next save loses at most the current turn's work, and
+		// the saved log is always valid for replay -- the system message
+		// is rebuilt from current prompts on load, so prompt edits also
+		// take effect on restart.
+		//
+		// Skip the write when nothing has changed since the last save
+		// (same message count, same idle streak). The loop only ever
+		// appends to messages between saves, so length is a sufficient
+		// change detector.
+		//
+		// No-op when state_file is empty. Errors are logged but not
+		// fatal: a transient disk problem should not kill the agent.
+		if a.cfg.Agent.StateFile != "" && (len(messages) != lastSavedLen || idleStreak != lastSavedIdle) {
+			if err := SaveState(a.cfg.Agent.StateFile, messages, idleStreak); err != nil {
+				a.logger.Error("save state failed", "error", err)
+			} else {
+				lastSavedLen = len(messages)
+				lastSavedIdle = idleStreak
+			}
 		}
 
 		// Send to LLM. We deliberately let the request run to completion
@@ -286,6 +371,8 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 				messages = append(messages, toolMessage(tc.ID, deferredBody))
 			}
 			messages = a.appendCollaboratorMessages(messages, pending)
+			// Tool calls + new input both count as the model engaging.
+			idleStreak = 0
 
 		case len(msg.ToolCalls) > 0:
 			// Normal tool execution path.
@@ -294,18 +381,35 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 				result := a.tools.Execute(ctx, tc)
 				messages = append(messages, toolMessage(tc.ID, result))
 			}
+			idleStreak = 0
 
 		case len(pending) > 0:
 			// Text-only response with collaborator messages waiting: surface
 			// them in place of the continue prompt so the next turn
-			// addresses the collaborator naturally.
+			// addresses the collaborator naturally. New collaborator input
+			// resets the idle counter.
 			messages = a.appendCollaboratorMessages(messages, pending)
+			idleStreak = 0
 
 		default:
-			// Text-only response, nothing to inject - keep the loop going.
+			// Text-only response, nothing to inject. This is the path that
+			// can degenerate into an infinite loop if the model decides to
+			// "stay silent". Track the streak and escalate the prompt once
+			// it crosses idleNudgeThreshold; force compaction higher up
+			// the loop once it crosses idleForceCompactionThreshold.
+			idleStreak++
+			now := time.Now()
+			var content string
+			if idleStreak >= idleNudgeThreshold {
+				a.logger.Warn("idle streak escalating, injecting nudge prompt",
+					"idle_streak", idleStreak)
+				content = fmt.Sprintf(idleNudgePrompt, now.Format(time.RFC1123), idleStreak)
+			} else {
+				content = RenderPrompt(prompts["continue"], now)
+			}
 			messages = append(messages, openai.ChatCompletionMessage{
 				Role:    openai.ChatMessageRoleUser,
-				Content: RenderPrompt(prompts["continue"], time.Now()),
+				Content: content,
 			})
 		}
 
@@ -316,7 +420,17 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 }
 
 // initializeContext builds the initial conversation context.
-func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]string, error) {
+//
+// When state persistence is enabled and a saved state file exists, the
+// conversation history is restored from disk; only the system message is
+// rebuilt from the current prompt and recent memories so prompt edits take
+// effect across restarts. The returned idleStreak is the value at the
+// point of the last save (so a daemon that crashed mid-loop resumes its
+// loop-detection counters too).
+//
+// When persistence is disabled or no state file exists, a fresh context
+// is built with the standard system prompt + cycle_start user turn.
+func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]string, int, error) {
 	// Build search index
 	docs, err := a.memory.AllFiles()
 	if err == nil && len(docs) > 0 {
@@ -327,21 +441,49 @@ func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]
 	// Load all mutable prompts from disk (seeding defaults on first run)
 	prompts, err := LoadAllPrompts(a.memory)
 	if err != nil {
-		return nil, nil, fmt.Errorf("load prompts: %w", err)
+		return nil, nil, 0, fmt.Errorf("load prompts: %w", err)
 	}
 
-	// Gather context memories
+	// Build a fresh system message from current prompts + recent memories.
+	// This is used both for fresh starts and for replacing the (stale)
+	// system message in a restored state file.
 	memories := a.gatherContextMemories()
-
-	// Build system prompt
 	now := time.Now()
 	fullSystemPrompt := BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
+	systemMsg := openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleSystem,
+		Content: fullSystemPrompt,
+	}
 
+	// Try to resume from a saved state file.
+	saved, savedIdle, err := LoadState(a.cfg.Agent.StateFile, a.logger)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("load state: %w", err)
+	}
+	if len(saved) > 0 {
+		// Replace the saved system message (which reflects whatever the
+		// prompt and memories looked like when the file was saved) with
+		// a freshly-built one. Keep everything from index 1 onwards.
+		// If the saved log somehow had no system message at index 0,
+		// just prepend the fresh one rather than discarding history.
+		var resumed []openai.ChatCompletionMessage
+		if saved[0].Role == openai.ChatMessageRoleSystem {
+			resumed = append([]openai.ChatCompletionMessage{systemMsg}, saved[1:]...)
+		} else {
+			resumed = append([]openai.ChatCompletionMessage{systemMsg}, saved...)
+		}
+
+		a.logger.Info("context resumed from state file",
+			"path", a.cfg.Agent.StateFile,
+			"messages", len(resumed),
+			"idle_streak", savedIdle,
+			"tokens_est", a.countMessageTokens(resumed))
+		return resumed, prompts, savedIdle, nil
+	}
+
+	// Fresh start: system message + cycle_start user turn.
 	messages := []openai.ChatCompletionMessage{
-		{
-			Role:    openai.ChatMessageRoleSystem,
-			Content: fullSystemPrompt,
-		},
+		systemMsg,
 		{
 			Role:    openai.ChatMessageRoleUser,
 			Content: RenderPrompt(prompts["cycle_start"], now),
@@ -352,7 +494,7 @@ func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]
 		"messages", len(messages),
 		"tokens_est", a.countMessageTokens(messages))
 
-	return messages, prompts, nil
+	return messages, prompts, 0, nil
 }
 
 // compactContext performs context compaction: asks the agent to save its state
