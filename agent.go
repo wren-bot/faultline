@@ -78,7 +78,7 @@ func NewAgent(cfg *Config, telegram *Telegram, logger *slog.Logger) (*Agent, err
 		cancel()
 	}
 
-	executor := NewToolExecutor(memory, index, telegram, sandbox, kobold, logger, cfg.Agent.MaxTokens)
+	executor := NewToolExecutor(memory, index, telegram, sandbox, kobold, logger, cfg.Agent.MaxTokens, cfg.Limits)
 
 	return &Agent{
 		cfg:      cfg,
@@ -335,7 +335,7 @@ func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]
 
 	// Build system prompt
 	now := time.Now()
-	fullSystemPrompt := BuildCycleContext(prompts["system"], memories, now)
+	fullSystemPrompt := BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
 
 	messages := []openai.ChatCompletionMessage{
 		{
@@ -442,7 +442,7 @@ func (a *Agent) rebuildContext(summary string) ([]openai.ChatCompletionMessage, 
 	// Load fresh memories
 	memories := a.gatherContextMemories()
 	now := time.Now()
-	fullSystemPrompt := BuildCycleContext(prompts["system"], memories, now)
+	fullSystemPrompt := BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
 
 	messages := []openai.ChatCompletionMessage{
 		{Role: openai.ChatMessageRoleSystem, Content: fullSystemPrompt},

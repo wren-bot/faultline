@@ -28,6 +28,24 @@ type Sandbox struct {
 	execLog     *DailyFileWriter // execution log in the logs directory
 	uid         int              // host uid for --user flag
 	gid         int              // host gid for --user flag
+
+	// outputLimit caps stdout/stderr returned to the agent for both
+	// script execution and shell exec. Zero or negative disables the
+	// cap. Set via SetOutputLimit after construction so callers can
+	// honor LimitsConfig without changing the constructor signature.
+	outputLimit int
+}
+
+// defaultSandboxOutputLimit is used when SetOutputLimit hasn't been called
+// or was given a non-positive value but the caller still wants a safety net.
+// Kept generous so the agent rarely sees clipped output.
+const defaultSandboxOutputLimit = 64000
+
+// SetOutputLimit configures the maximum number of characters of combined
+// stdout/stderr returned to the agent. A non-positive value disables the
+// cap (full output is returned).
+func (s *Sandbox) SetOutputLimit(n int) {
+	s.outputLimit = n
 }
 
 // sandboxFolders are the valid folder names within the sandbox.
@@ -588,11 +606,7 @@ func (s *Sandbox) Execute(ctx context.Context, script string, args []string) (st
 	}
 	s.logExec("execute", detail, elapsed, output, err)
 
-	// Truncate output if too long
-	const maxOutput = 24000
-	if len(output) > maxOutput {
-		output = output[:maxOutput] + "\n\n[Output truncated at 24000 characters. Write large output to /output/ instead.]"
-	}
+	output = s.truncateOutput(output, "Write large output to /output/ from your script and read it back with sandbox_read.")
 
 	if err != nil {
 		return fmt.Sprintf("Error: %s\n\nOutput:\n%s", err, output), nil
@@ -603,6 +617,23 @@ func (s *Sandbox) Execute(ctx context.Context, script string, args []string) (st
 	}
 
 	return output, nil
+}
+
+// truncateOutput clips output at the configured limit and appends a hint
+// telling the agent how much was lost and what to do about it. The hint
+// suggestion is caller-supplied so script vs. shell paths can give
+// different advice.
+func (s *Sandbox) truncateOutput(output, suggestion string) string {
+	limit := s.outputLimit
+	if limit <= 0 {
+		limit = defaultSandboxOutputLimit
+	}
+	if len(output) <= limit {
+		return output
+	}
+	return output[:limit] + fmt.Sprintf(
+		"\n\n[Output truncated: showing first %d of %d chars. %s]",
+		limit, len(output), suggestion)
 }
 
 // buildExecCommand constructs the shell command string for executing a script.
@@ -648,11 +679,7 @@ func (s *Sandbox) ShellExec(ctx context.Context, command string) (string, error)
 	detail := command[:min(len(command), 100)]
 	s.logExec("shell_exec", detail, elapsed, output, err)
 
-	// Truncate output if too long
-	const maxOutput = 24000
-	if len(output) > maxOutput {
-		output = output[:maxOutput] + "\n\n[Output truncated at 24000 characters.]"
-	}
+	output = s.truncateOutput(output, "Redirect large output to a file in /output/ (e.g. `cmd > /output/result.txt`) and read it back with sandbox_read.")
 
 	if err != nil {
 		return fmt.Sprintf("Error: %s\n\nOutput:\n%s", err, output), nil

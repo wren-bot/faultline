@@ -172,7 +172,7 @@ Manages the mutable prompt system:
 - **Embedding**: Default prompts are compiled into the binary via `//go:embed` directives from `prompts/*.md`.
 - **Seeding**: On first run, defaults are written to the memory store. Subsequent runs load from disk, allowing the agent to have modified them.
 - **Template rendering**: `RenderPrompt()` substitutes `{{TIME}}` with the current timestamp.
-- **`BuildCycleContext()`**: Assembles the full system message by combining the system prompt, current timestamp, and up to 5 recent memories (truncated to 2000 chars each).
+- **`BuildCycleContext()`**: Assembles the full system message by combining the system prompt, current timestamp, and up to 5 recent memories. Each memory is clipped to `Limits.RecentMemoryChars` (default 8000); a non-positive value disables the cap. When clipped, a retrieval hint is appended naming the file and suggesting a `memory_read` offset to resume from. The same pattern is used by `memory_search` (`Limits.MemorySearchResultChars`, default 6000) and sandbox script/shell output (`Limits.SandboxOutputChars`, default 64000).
 
 ### log.go (133 lines)
 

@@ -39,6 +39,45 @@ url = "http://example.com/v1"
 	if cfg.Agent.MaxTokens != defaults.Agent.MaxTokens {
 		t.Errorf("MaxTokens = %d, want default %d", cfg.Agent.MaxTokens, defaults.Agent.MaxTokens)
 	}
+	if cfg.Limits.RecentMemoryChars != defaults.Limits.RecentMemoryChars {
+		t.Errorf("Limits.RecentMemoryChars = %d, want default %d",
+			cfg.Limits.RecentMemoryChars, defaults.Limits.RecentMemoryChars)
+	}
+	if cfg.Limits.MemorySearchResultChars != defaults.Limits.MemorySearchResultChars {
+		t.Errorf("Limits.MemorySearchResultChars = %d, want default %d",
+			cfg.Limits.MemorySearchResultChars, defaults.Limits.MemorySearchResultChars)
+	}
+	if cfg.Limits.SandboxOutputChars != defaults.Limits.SandboxOutputChars {
+		t.Errorf("Limits.SandboxOutputChars = %d, want default %d",
+			cfg.Limits.SandboxOutputChars, defaults.Limits.SandboxOutputChars)
+	}
+}
+
+func TestLoadConfig_LimitsOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	contents := `
+[limits]
+recent_memory_chars = 12345
+memory_search_result_chars = 6789
+sandbox_output_chars = 100000
+`
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Limits.RecentMemoryChars != 12345 {
+		t.Errorf("RecentMemoryChars = %d, want 12345", cfg.Limits.RecentMemoryChars)
+	}
+	if cfg.Limits.MemorySearchResultChars != 6789 {
+		t.Errorf("MemorySearchResultChars = %d, want 6789", cfg.Limits.MemorySearchResultChars)
+	}
+	if cfg.Limits.SandboxOutputChars != 100000 {
+		t.Errorf("SandboxOutputChars = %d, want 100000", cfg.Limits.SandboxOutputChars)
+	}
 }
 
 func TestLoadConfig_DurationParsing(t *testing.T) {

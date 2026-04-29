@@ -189,7 +189,7 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "memory_search",
-				Description: "Search across all memory files by keyword relevance (BM25). Returns up to 5 results, each with: file path, relevance score, and content (truncated to 1500 chars). Use this to find memories by topic when you don't know the exact file path. Optionally filter by file modification date.",
+				Description: "Search across all memory files by keyword relevance (BM25). Returns up to 5 results, each with: file path, relevance score, and content. Long results are clipped with a hint pointing back at memory_read so you can load the full file. Use this to find memories by topic when you don't know the exact file path. Optionally filter by file modification date.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -651,7 +651,7 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 				Type: openai.ToolTypeFunction,
 				Function: &openai.FunctionDefinition{
 					Name:        "sandbox_execute",
-					Description: "Execute a Python script in the sandbox. The script must exist in the scripts/ folder. Dependencies are synced automatically before execution. The script runs in a Docker container with read-only access to /scripts and /input, and read-write access to /output. Returns combined stdout/stderr output (truncated to 24000 chars). For large output, write results to /output/ from your script.",
+					Description: "Execute a Python script in the sandbox. The script must exist in the scripts/ folder. Dependencies are synced automatically before execution. The script runs in a Docker container with read-only access to /scripts and /input, and read-write access to /output. Returns combined stdout/stderr output. Output beyond the configured cap is clipped with a hint telling you the full size; for large output, write results to /output/ from your script and read them back with sandbox_read.",
 					Parameters: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -735,7 +735,7 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 				Type: openai.ToolTypeFunction,
 				Function: &openai.FunctionDefinition{
 					Name:        "sandbox_shell",
-					Description: "Run an arbitrary shell command inside the sandbox Docker container. Use this to execute commands like git, ls, cat, wc, grep, find, or any other command available in the container. The command runs with the same mounts as sandbox scripts (/scripts read-only, /input read-only, /output read-write). Output is truncated to 24000 chars.",
+					Description: "Run an arbitrary shell command inside the sandbox Docker container. Use this to execute commands like git, ls, cat, wc, grep, find, or any other command available in the container. The command runs with the same mounts as sandbox scripts (/scripts read-only, /input read-only, /output read-write). Output beyond the configured cap is clipped with a hint telling you the full size; redirect large output to /output/ and read it back with sandbox_read.",
 					Parameters: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -778,10 +778,14 @@ type ToolExecutor struct {
 	cache         *webCache
 	maxTokens     int
 	currentTokens int
+	limits        LimitsConfig
 }
 
 // NewToolExecutor creates a new tool executor. kobold may be nil.
-func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, kobold *KoboldExtras, logger *slog.Logger, maxTokens int) *ToolExecutor {
+func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, kobold *KoboldExtras, logger *slog.Logger, maxTokens int, limits LimitsConfig) *ToolExecutor {
+	if sandbox != nil {
+		sandbox.SetOutputLimit(limits.SandboxOutputChars)
+	}
 	return &ToolExecutor{
 		memory:    memory,
 		index:     index,
@@ -790,6 +794,7 @@ func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram
 		kobold:    kobold,
 		logger:    logger,
 		maxTokens: maxTokens,
+		limits:    limits,
 		cache:     newWebCache(60 * time.Second),
 		http: &http.Client{
 			Timeout: 30 * time.Second,
@@ -1194,13 +1199,18 @@ func (te *ToolExecutor) memorySearch(argsJSON string) string {
 	}
 
 	var sb strings.Builder
+	limit := te.limits.MemorySearchResultChars
 	for i, r := range results {
 		content := r.Content
-		if len(content) > 1500 {
-			content = content[:1500] + "\n[truncated]"
+		total := len(content)
+		var tail string
+		if limit > 0 && total > limit {
+			content = content[:limit]
+			tail = fmt.Sprintf("\n[truncated: showing first %d of %d chars; call memory_read with path=%q to read the full file, or with offset=%d to continue from where this preview ends]",
+				limit, total, r.Path, lineCountFor(content)+1)
 		}
-		fmt.Fprintf(&sb, "--- Result %d: %s (score: %.2f) ---\n%s\n\n",
-			i+1, r.Path, r.Score, content)
+		fmt.Fprintf(&sb, "--- Result %d: %s (score: %.2f) ---\n%s%s\n\n",
+			i+1, r.Path, r.Score, content, tail)
 	}
 
 	return sb.String()

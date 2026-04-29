@@ -54,7 +54,20 @@ dir = "./sandbox"                   # Sandbox working directory
 timeout = "5m"                      # Script execution timeout
 network = false                     # Allow network access in sandbox
 memory_limit = "512m"               # Docker memory limit
+
+[limits]
+# Per-entry cap on "Recent Memories" content shown in the system prompt
+# (5 entries surface per turn). When clipped, a hint pointing at memory_read
+# is appended so the agent knows how to load the full file.
+recent_memory_chars = 8000
+# Per-result cap on memory_search output (5 results per query).
+memory_search_result_chars = 6000
+# Cap on combined stdout/stderr returned by sandbox_execute / sandbox_shell.
+# Larger output should be written to /output/ and read back with sandbox_read.
+sandbox_output_chars = 64000
 ```
+
+Set any limit to `0` to disable the cap and pass full content through.
 
 ## Running
 

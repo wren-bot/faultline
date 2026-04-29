@@ -15,6 +15,7 @@ type Config struct {
 	Telegram TelegramConfig `toml:"telegram"`
 	Log      LogConfig      `toml:"log"`
 	Sandbox  SandboxConfig  `toml:"sandbox"`
+	Limits   LimitsConfig   `toml:"limits"`
 }
 
 // APIConfig holds LLM API connection settings.
@@ -60,6 +61,27 @@ type SandboxConfig struct {
 	Timeout     duration `toml:"timeout"`
 	Network     bool     `toml:"network"`
 	MemoryLimit string   `toml:"memory_limit"`
+}
+
+// LimitsConfig holds configurable size caps for content the agent sees in
+// its context. Each limit applies to a different LLM-facing surface; when
+// content is clipped, a retrieval hint is appended so the agent knows which
+// tool to call to read the rest. Zero or negative values disable the cap
+// for that surface (the full content is included).
+type LimitsConfig struct {
+	// RecentMemoryChars caps each "Recent Memories" entry in the system
+	// prompt. Five entries are surfaced per turn, so this multiplied by 5
+	// is the rough upper bound on memory content in the system prompt.
+	RecentMemoryChars int `toml:"recent_memory_chars"`
+
+	// MemorySearchResultChars caps each result returned by memory_search.
+	// Five results are returned per query.
+	MemorySearchResultChars int `toml:"memory_search_result_chars"`
+
+	// SandboxOutputChars caps the combined stdout/stderr returned by
+	// sandbox_execute and sandbox_shell. Larger output should be written
+	// to /output/ and read back with sandbox_read.
+	SandboxOutputChars int `toml:"sandbox_output_chars"`
 }
 
 // Enabled returns true if Telegram is configured.
@@ -109,6 +131,14 @@ func DefaultConfig() *Config {
 			Timeout:     duration(5 * time.Minute),
 			Network:     false,
 			MemoryLimit: "512m",
+		},
+		Limits: LimitsConfig{
+			// Defaults are substantially larger than the original
+			// hard-coded values (2000 / 1500 / 24000) so the agent
+			// rarely sees clipped content in practice.
+			RecentMemoryChars:       8000,
+			MemorySearchResultChars: 6000,
+			SandboxOutputChars:      64000,
 		},
 	}
 }
