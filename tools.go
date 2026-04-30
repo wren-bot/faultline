@@ -122,7 +122,7 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 				},
 			},
 		},
-				{
+		{
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "wiki_fetch",
@@ -151,7 +151,6 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 				},
 			},
 		},
-
 		{
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
