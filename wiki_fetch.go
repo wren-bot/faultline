@@ -10,7 +10,7 @@ import (
 
 // wikiFetch fetches a Wikipedia article as clean plain text via the MediaWiki API.
 // Uses action=query&prop=extracts&explaintext=true for direct plain text output
-// — no HTML parsing needed.
+// - no HTML parsing needed.
 func (te *ToolExecutor) wikiFetch(argsJSON string) string {
 	var args struct {
 		Title  string `json:"title"`
